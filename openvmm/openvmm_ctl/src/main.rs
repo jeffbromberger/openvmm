@@ -100,6 +100,29 @@ enum Cmd {
     /// preferred at-a-glance view.
     Status,
 
+    /// Hot add a VMBus SCSI disk to the default storvsp controller. The VM
+    /// must have a SCSI controller (true for nearly all openvmm configs --
+    /// see `Vm.scsi_rpc` in ttrpc/mod.rs).
+    AddScsiDisk {
+        /// Target LUN. Must not already be in use.
+        #[arg(long)]
+        lun: u32,
+        /// Host file backing the disk. Raw image or VHD/VHDX (auto-detected
+        /// by `open_disk_type` server-side; the `DiskType` field in the
+        /// proto is ignored).
+        #[arg(long)]
+        file: PathBuf,
+        /// Open the backing file read-only.
+        #[arg(long, default_value_t = false)]
+        read_only: bool,
+    },
+
+    /// Hot remove a VMBus SCSI disk by LUN.
+    RemoveScsiDisk {
+        #[arg(long)]
+        lun: u32,
+    },
+
     /// Save a snapshot of the VM (memory + state) to the given directory and
     /// leave the VM paused. Requires openvmm to have been launched with
     /// file-backed memory (e.g. `--memory file=<path>`). After save the VM
@@ -217,6 +240,50 @@ fn main() -> anyhow::Result<()> {
                     .await
                     .map_err(|s| anyhow::anyhow!("Inspect(vm) rpc failed: {s:?}"))?;
                 print_status(&resp.result);
+            }
+            Cmd::AddScsiDisk {
+                lun,
+                file,
+                read_only,
+            } => {
+                let req = vmservice::ModifyResourceRequest {
+                    r#type: vmservice::ModifyType::Add.into(),
+                    resource: Some(vmservice::modify_resource_request::Resource::ScsiDisk(
+                        vmservice::ScsiDisk {
+                            controller: 0,
+                            lun,
+                            host_path: file.to_string_lossy().into_owned(),
+                            r#type: vmservice::DiskType::ScsiDiskTypeVhdx.into(),
+                            read_only,
+                        },
+                    )),
+                };
+                client
+                    .call()
+                    .start(vmservice::Vm::ModifyResource, req)
+                    .await
+                    .map_err(|s| anyhow::anyhow!("ModifyResource(Add SCSI) rpc failed: {s:?}"))?;
+                println!("scsi disk added at lun {lun}");
+            }
+            Cmd::RemoveScsiDisk { lun } => {
+                let req = vmservice::ModifyResourceRequest {
+                    r#type: vmservice::ModifyType::Remove.into(),
+                    resource: Some(vmservice::modify_resource_request::Resource::ScsiDisk(
+                        vmservice::ScsiDisk {
+                            controller: 0,
+                            lun,
+                            host_path: String::new(),
+                            r#type: vmservice::DiskType::ScsiDiskTypeVhdx.into(),
+                            read_only: false,
+                        },
+                    )),
+                };
+                client
+                    .call()
+                    .start(vmservice::Vm::ModifyResource, req)
+                    .await
+                    .map_err(|s| anyhow::anyhow!("ModifyResource(Remove SCSI) rpc failed: {s:?}"))?;
+                println!("scsi disk removed at lun {lun}");
             }
             Cmd::SaveSnapshot { dir } => {
                 let req = vmservice::SaveSnapshotRequest {

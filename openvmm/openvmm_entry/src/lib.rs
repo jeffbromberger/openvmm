@@ -190,6 +190,10 @@ struct VmResources {
     scsi_rpc: Option<mesh::Sender<ScsiControllerRequest>>,
     nvme_vtl2_rpc: Option<mesh::Sender<NvmeControllerRequest>>,
     consomme_rpc: Option<mesh::Sender<net_backend_resources::consomme::ConsommeRequest>>,
+    /// Per-controller NVMe request senders for hot add/remove of namespaces,
+    /// keyed by user-visible controller name (`--nvme-pci id=<name>`). Used
+    /// by the `--ttrpc-management` server to route `ModifyResource` requests.
+    nvme_pcie_rpcs: std::collections::HashMap<String, mesh::Sender<NvmeControllerRequest>>,
     ged_rpc: Option<mesh::Sender<get_resources::ged::GuestEmulationRequest>>,
     vtl2_settings: Option<vtl2_settings_proto::Vtl2Settings>,
     /// Receives dirty rectangles from the synthetic video device for the VNC worker.
@@ -454,6 +458,15 @@ async fn vm_config_from_command_line(
 
     let mut storage = storage_builder::StorageBuilder::new(with_get.then_some(openhcl_vtl));
 
+    // Per-controller NVMe request senders, populated for each --nvme-pci
+    // (and the legacy --nvme path). Stashed into VmResources so the
+    // --ttrpc-management server can route ModifyResource requests to the
+    // right controller.
+    let mut nvme_pcie_rpcs: std::collections::HashMap<
+        String,
+        mesh::Sender<NvmeControllerRequest>,
+    > = std::collections::HashMap::new();
+
     // Register named controllers first, so that --disk on=<name>
     // references can be resolved.
     for ctrl in &opt.nvme_pci {
@@ -466,7 +479,11 @@ async fn vm_config_from_command_line(
                 storage_builder::NvmeControllerTransport::Vpci(guid)
             }
         };
-        storage.add_nvme_controller(ctrl.id.clone(), ctrl.vtl, transport, None)?;
+        let (send, recv) = mesh::channel();
+        storage.add_nvme_controller(ctrl.id.clone(), ctrl.vtl, transport, Some(recv))?;
+        if nvme_pcie_rpcs.insert(ctrl.id.clone(), send).is_some() {
+            anyhow::bail!("duplicate --nvme-pci id '{}'", ctrl.id);
+        }
     }
 
     for ctrl in &opt.vmbus_scsi {
@@ -575,15 +592,20 @@ async fn vm_config_from_command_line(
         for disk in &opt.nvme {
             if let Some(port) = &disk.pcie_port {
                 if registered_ports.insert(port.clone()) {
+                    // Same per-controller request channel pattern as --nvme-pci above.
+                    let (send, recv) = mesh::channel();
                     storage.add_nvme_controller(
                         port.clone(),
                         DeviceVtl::Vtl0,
                         storage_builder::NvmeControllerTransport::Pcie(port.clone()),
-                        None,
+                        Some(recv),
                     ).with_context(|| format!(
                         "legacy --nvme flag conflicts with an explicit controller named '{port}'; \
                          use --nvme-pci and --disk on=<name> instead"
                     ))?;
+                    if nvme_pcie_rpcs.insert(port.clone(), send).is_some() {
+                        anyhow::bail!("duplicate implicit NVMe controller '{port}'");
+                    }
                 }
             }
         }
@@ -2010,6 +2032,7 @@ async fn vm_config_from_command_line(
     };
 
     storage.build_config(&mut cfg, &mut resources, opt.scsi_sub_channels)?;
+    resources.nvme_pcie_rpcs = nvme_pcie_rpcs;
     Ok((cfg, resources))
 }
 
@@ -2739,6 +2762,52 @@ async fn run_control_inner(
             crash: opt.guest_crash_action,
             watchdog: opt.guest_watchdog_action,
         },
+    };
+
+    // Spawn an optional supplemental ttrpc management server. When the user
+    // passed --ttrpc-management <socket>, expose a subset of the vmservice
+    // RPCs (pause/resume + ModifyResource for NVMe-namespace hot add/remove)
+    // over that socket. The VM lifecycle remains owned by this CLI process;
+    // the management server only mutates already-live state.
+    #[cfg(any(feature = "grpc", feature = "ttrpc"))]
+    let _mgmt_task: Option<Task<anyhow::Result<()>>> = if let Some(path) =
+        opt.ttrpc_management.as_ref()
+    {
+        let _ = std::fs::remove_file(path);
+        let listener = unix_socket::UnixListener::bind(path)
+            .with_context(|| format!("failed to bind management socket {}", path.display()))?;
+        let nvme_rpcs = std::mem::take(&mut resources.nvme_pcie_rpcs);
+        let scsi_for_mgmt = resources.scsi_rpc.clone();
+        let worker_for_mgmt = vm_rpc.clone();
+        let controller_for_mgmt = vm_controller_send.clone();
+        let driver_for_mgmt = driver.clone();
+        let path_display = path.display().to_string();
+        tracing::info!(socket = %path_display,
+            nvme_controllers = nvme_rpcs.len(),
+            has_scsi = scsi_for_mgmt.is_some(),
+            "starting --ttrpc-management server"
+        );
+        Some(driver.spawn("ttrpc-management", async move {
+            let r = ttrpc::run_management(
+                driver_for_mgmt,
+                listener,
+                ttrpc::RpcTransport::Ttrpc,
+                worker_for_mgmt,
+                controller_for_mgmt,
+                scsi_for_mgmt,
+                nvme_rpcs,
+            )
+            .await;
+            if let Err(err) = &r {
+                tracing::error!(
+                    error = err.as_ref() as &dyn std::error::Error,
+                    "ttrpc management server exited with error"
+                );
+            }
+            r
+        }))
+    } else {
+        None
     };
 
     // Spawn the VmController as a task.

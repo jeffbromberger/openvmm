@@ -278,6 +278,30 @@ message WindowsPCIDevice {
     string instance_id = 1;
 }
 
+// Configuration for hot add/remove of an NVMe namespace on a named NVMe
+// controller. The controller must have been instantiated at VM-launch time
+// (e.g. via the `--nvme-pci id=<name>,...` CLI flag); this RPC manipulates
+// the namespace list on a live controller and does not create the
+// controller itself.
+//
+// On ADD: the emulator allocates a new namespace, exposes it to the guest
+// driver via the standard NVMe `CHANGED_NAMESPACE_LIST` Asynchronous Event
+// Notification, and the namespace becomes addressable as the supplied
+// `nsid`.
+// On REMOVE: the emulator removes the namespace and notifies the guest the
+// same way; the `host_path` field is ignored.
+message NvmeNamespaceConfig {
+    // User-visible controller name (matches the `id=` from `--nvme-pci`).
+    string controller_name = 1;
+    // NVMe namespace identifier (1..N).
+    uint32 nsid = 2;
+    // Host-side backing for the namespace. Currently only file paths are
+    // supported; the path must be a flat raw image or a VHD/VHDX
+    // recognised by the openvmm disk backends. Ignored when type=REMOVE.
+    string host_path = 3;
+    bool read_only = 4;
+}
+
 message VirtioFSConfig {
     string tag = 1;
     string root_path = 2;
@@ -307,5 +331,6 @@ message ModifyResourceRequest {
         VPMEMDisk vpmem_disk = 6;
         NICConfig nic_config = 7;
         WindowsPCIDevice windows_device = 8;
+        NvmeNamespaceConfig nvme_namespace = 9;
     }
 }

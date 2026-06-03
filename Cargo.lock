@@ -5631,6 +5631,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "openvmm_ctl"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "inspect",
+ "inspect_proto",
+ "mesh",
+ "mesh_rpc",
+ "openvmm_ttrpc_vmservice",
+ "pal_async",
+]
+
+[[package]]
 name = "openvmm_defs"
 version = "0.0.0"
 dependencies = [

@@ -747,6 +747,21 @@ options:
     #[clap(long, value_name = "SOCKETPATH", conflicts_with("ttrpc"))]
     pub grpc: Option<PathBuf>,
 
+    /// expose a supplemental ttrpc management server on the specified Unix
+    /// socket alongside a CLI-launched VM. Unlike `--ttrpc` (which is
+    /// mutually exclusive with the rest of the CLI launch args because that
+    /// mode requires the client to CreateVm), `--ttrpc-management` runs
+    /// alongside a normal CLI launch and only accepts a subset of RPCs:
+    /// pause/resume, ModifyResource for NVMe namespace hot add/remove, and
+    /// Inspect. CreateVm/TeardownVm/Quit/WaitVm are refused.
+    #[clap(
+        long,
+        value_name = "SOCKETPATH",
+        conflicts_with("ttrpc"),
+        conflicts_with("grpc")
+    )]
+    pub ttrpc_management: Option<PathBuf>,
+
     /// do not launch child processes
     #[clap(long)]
     pub single_process: bool,

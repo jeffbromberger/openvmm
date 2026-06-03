@@ -148,6 +148,7 @@ impl Worker for TtrpcWorker {
                 halted: false,
                 rpc_tasks: Vec::new(),
                 transport: self.transport,
+                mode: ServiceMode::Owned,
             };
             service.run(self.listener, recv).await?;
             Ok(())
@@ -327,6 +328,25 @@ struct Vm {
     worker_rpc: mesh::Sender<VmRpc>,
     scsi_rpc: Option<mesh::Sender<ScsiControllerRequest>>,
     consomme_rpc: Option<mesh::Sender<ConsommeRequest>>,
+    /// Per-controller NVMe request senders for hot add/remove of namespaces,
+    /// keyed by user-visible controller name. Populated when the VM was
+    /// launched from CLI via the `--ttrpc-management` path; empty when the
+    /// VM was built via the `CreateVm` RPC (which does not currently expose
+    /// NVMe controllers).
+    nvme_rpcs: std::collections::HashMap<String, mesh::Sender<nvme_resources::NvmeControllerRequest>>,
+}
+
+/// Mode in which a `VmService` was constructed. Controls which RPCs are
+/// honoured.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ServiceMode {
+    /// Full lifecycle owner: created from `--ttrpc` / `--grpc` with no other
+    /// CLI args. `CreateVm` / `TeardownVm` / `Quit` / `WaitVm` are all
+    /// supported.
+    Owned,
+    /// Supplemental management: VM was launched from CLI elsewhere and we
+    /// were handed pre-built handles. Lifecycle-mutating RPCs are refused.
+    Management,
 }
 
 struct VmService {
@@ -341,6 +361,7 @@ struct VmService {
     halted: bool,
     rpc_tasks: Vec<Task<()>>,
     transport: ResolvedTransport,
+    mode: ServiceMode,
 }
 
 fn grpc_error(err: anyhow::Error) -> Status {
@@ -374,6 +395,37 @@ enum HandleAction {
 impl VmService {
     async fn handle(&mut self, ctx: mesh::CancelContext, request: vmservice::Vm) -> HandleAction {
         tracing::debug!(?request, "request");
+        // In management mode the outer CLI process owns the VM lifecycle;
+        // reject RPCs that would create or destroy the VM.
+        if self.mode == ServiceMode::Management {
+            match &request {
+                vmservice::Vm::CreateVm(_, _) => {
+                    request.fail(grpc_error(anyhow!(
+                        "CreateVm not supported in --ttrpc-management mode; VM already created from CLI args"
+                    )));
+                    return HandleAction::None;
+                }
+                vmservice::Vm::TeardownVm(_, _) => {
+                    request.fail(grpc_error(anyhow!(
+                        "TeardownVm not supported in --ttrpc-management mode; stop the CLI process to tear down"
+                    )));
+                    return HandleAction::None;
+                }
+                vmservice::Vm::Quit(_, _) => {
+                    request.fail(grpc_error(anyhow!(
+                        "Quit not supported in --ttrpc-management mode; stop the CLI process directly"
+                    )));
+                    return HandleAction::None;
+                }
+                vmservice::Vm::WaitVm(_, _) => {
+                    request.fail(grpc_error(anyhow!(
+                        "WaitVm not supported in --ttrpc-management mode (no halt event channel)"
+                    )));
+                    return HandleAction::None;
+                }
+                _ => {}
+            }
+        }
         match request {
             vmservice::Vm::CreateVm(request, response) => {
                 response.send(map_grpc(self.create_vm(request).await))
@@ -800,6 +852,7 @@ impl VmService {
             scsi_rpc,
             consomme_rpc,
             worker_rpc: send,
+            nvme_rpcs: std::collections::HashMap::new(),
         }));
         Ok(())
     }
@@ -969,6 +1022,57 @@ impl VmService {
                     anyhow::bail!("unsupported NIC modify type {}", request.r#type);
                 }
             }
+            Resource::NvmeNamespace(ns) => {
+                let sender = vm
+                    .nvme_rpcs
+                    .get(&ns.controller_name)
+                    .with_context(|| {
+                        format!(
+                            "unknown nvme controller '{}': no per-controller request channel registered (only --nvme-pci controllers from --ttrpc-management mode are addressable)",
+                            ns.controller_name
+                        )
+                    })?
+                    .clone();
+                if request.r#type == vmservice::ModifyType::Add as i32 {
+                    Ok(async move {
+                        let disk = open_disk_type(
+                            ns.host_path.as_ref(),
+                            OpenDiskOptions {
+                                read_only: ns.read_only,
+                                direct: false,
+                            },
+                        )
+                        .await
+                        .with_context(|| format!("failed to open '{}'", ns.host_path))?;
+                        let nsdef = nvme_resources::NamespaceDefinition {
+                            nsid: ns.nsid,
+                            read_only: ns.read_only,
+                            disk,
+                        };
+                        sender
+                            .call_failable(
+                                nvme_resources::NvmeControllerRequest::AddNamespace,
+                                nsdef,
+                            )
+                            .await
+                            .map_err(anyhow::Error::from)
+                    }
+                    .boxed())
+                } else if request.r#type == vmservice::ModifyType::Remove as i32 {
+                    Ok(async move {
+                        sender
+                            .call_failable(
+                                nvme_resources::NvmeControllerRequest::RemoveNamespace,
+                                ns.nsid,
+                            )
+                            .await
+                            .map_err(anyhow::Error::from)
+                    }
+                    .boxed())
+                } else {
+                    anyhow::bail!("unsupported request type {} for NvmeNamespace", request.r#type);
+                }
+            }
             Resource::VpmemDisk(_) => anyhow::bail!("vpmem not supported"),
             Resource::WindowsDevice(_) => anyhow::bail!("device assignment not supported"),
             Resource::Processor(_) | Resource::ProcessorConfig(_) | Resource::Memory(_) => {
@@ -1098,4 +1202,61 @@ async fn make_disk_config(disk: vmservice::ScsiDisk) -> anyhow::Result<ScsiDevic
         }
         .into_resource(),
     })
+}
+
+
+/// Run a supplemental ttrpc/grpc management server alongside a VM that was
+/// already launched by some other means (e.g. the openvmm CLI). The caller
+/// passes in the live VM's worker_rpc, the optional scsi_rpc, and a map of
+/// per-controller NVMe request senders. This server accepts a subset of the
+/// vmservice RPCs: `PauseVm`, `ResumeVm`, and `ModifyResource` (with
+/// the new `NvmeNamespace` variant). RPCs that would create or destroy
+/// the VM (`CreateVm`, `TeardownVm`, `Quit`, `WaitVm`) are
+/// explicitly refused.
+pub async fn run_management(
+    driver: DefaultDriver,
+    listener: UnixListener,
+    transport: RpcTransport,
+    worker_rpc: mesh::Sender<VmRpc>,
+    vm_controller: mesh::Sender<VmControllerRpc>,
+    scsi_rpc: Option<mesh::Sender<ScsiControllerRequest>>,
+    nvme_rpcs: std::collections::HashMap<
+        String,
+        mesh::Sender<nvme_resources::NvmeControllerRequest>,
+    >,
+) -> anyhow::Result<()> {
+    let resolved = match transport {
+        #[cfg(feature = "ttrpc")]
+        RpcTransport::Ttrpc => ResolvedTransport::Ttrpc,
+        #[cfg(feature = "grpc")]
+        RpcTransport::Grpc => ResolvedTransport::Grpc,
+        #[expect(clippy::allow_attributes)]
+        #[allow(unreachable_patterns)]
+        t => bail!("unsupported transport {t}"),
+    };
+
+    let mut service = VmService {
+        driver,
+        vm: Some(Arc::new(Vm {
+            worker_rpc,
+            scsi_rpc,
+            consomme_rpc: None,
+            nvme_rpcs,
+        })),
+        vm_controller: Some(vm_controller),
+        vm_controller_events: None,
+        controller_task: None,
+        wait_vm_response: None,
+        halted: false,
+        rpc_tasks: Vec::new(),
+        transport: resolved,
+        mode: ServiceMode::Management,
+    };
+
+    // The shared dispatch loop expects a WorkerRpc receiver to detect
+    // outer-process stop. In management mode we have no parent worker, so we
+    // wire up a never-firing receiver and let the server run until the
+    // socket is closed.
+    let (_send, recv) = mesh::channel::<WorkerRpc<()>>();
+    service.run(listener, recv).await
 }

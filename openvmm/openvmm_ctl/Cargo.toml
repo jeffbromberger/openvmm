@@ -1,0 +1,26 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "openvmm_ctl"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "openvmm-ctl"
+path = "src/main.rs"
+
+[dependencies]
+openvmm_ttrpc_vmservice.workspace = true
+inspect.workspace = true
+inspect_proto.workspace = true
+
+mesh.workspace = true
+mesh_rpc.workspace = true
+pal_async.workspace = true
+
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

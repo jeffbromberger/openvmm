@@ -481,6 +481,10 @@ impl VmService {
                         let r = self.modify_resource(&vm, request);
                         self.start_rpc(response, r);
                     }
+                    vmservice::Vm::SaveSnapshot(request, response) => {
+                        let r = self.save_snapshot(request);
+                        self.start_rpc(response, r);
+                    }
 
                     r @ vmservice::Vm::CapabilitiesVm(_, _)
                     | r @ vmservice::Vm::PropertiesVm(_, _) => {
@@ -880,6 +884,24 @@ impl VmService {
     fn resume_vm(&mut self, vm: &Vm) -> impl Future<Output = anyhow::Result<()>> + use<> {
         let recv = vm.worker_rpc.call(VmRpc::Resume, ());
         async move { recv.await.map(drop).context("resume failed") }
+    }
+
+    fn save_snapshot(
+        &mut self,
+        request: vmservice::SaveSnapshotRequest,
+    ) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<>> {
+        let controller = self
+            .vm_controller
+            .as_ref()
+            .context("vm_controller not wired up for this server (server built without it)")?
+            .clone();
+        Ok(async move {
+            controller
+                .call(VmControllerRpc::SaveSnapshot, request.dir)
+                .await
+                .map_err(anyhow::Error::from)?
+                .map_err(anyhow::Error::from)
+        })
     }
 
     fn handle_controller_event(&mut self, event: VmControllerEvent) {

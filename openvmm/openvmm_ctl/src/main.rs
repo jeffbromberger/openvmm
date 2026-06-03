@@ -99,6 +99,17 @@ enum Cmd {
     /// VM. Backed by a single Inspect("vm", depth=10) RPC; this is the
     /// preferred at-a-glance view.
     Status,
+
+    /// Save a snapshot of the VM (memory + state) to the given directory and
+    /// leave the VM paused. Requires openvmm to have been launched with
+    /// file-backed memory (e.g. `--memory file=<path>`). After save the VM
+    /// is paused; to resume, terminate openvmm and relaunch with
+    /// `--restore-snapshot <dir>`.
+    SaveSnapshot {
+        /// Target directory. Must not already exist.
+        #[arg(long)]
+        dir: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -206,6 +217,20 @@ fn main() -> anyhow::Result<()> {
                     .await
                     .map_err(|s| anyhow::anyhow!("Inspect(vm) rpc failed: {s:?}"))?;
                 print_status(&resp.result);
+            }
+            Cmd::SaveSnapshot { dir } => {
+                let req = vmservice::SaveSnapshotRequest {
+                    dir: dir.to_string_lossy().into_owned(),
+                };
+                client
+                    .call()
+                    .start(vmservice::Vm::SaveSnapshot, req)
+                    .await
+                    .map_err(|s| anyhow::anyhow!("SaveSnapshot rpc failed: {s:?}"))?;
+                println!(
+                    "snapshot saved to {}; VM is paused. Stop openvmm and relaunch with --restore-snapshot <dir> to continue.",
+                    dir.display()
+                );
             }
         }
 

@@ -44,6 +44,15 @@ service VM {
     // This includes things such as block devices, network adapters, and pci devices.
     rpc ModifyResource(ModifyResourceRequest) returns (google.protobuf.Empty);
 
+    // SaveSnapshot writes a snapshot of the VM's full state (memory, VP
+    // registers, device state) to the specified directory and pauses the
+    // VM. Requires the VM to have been launched with file-backed memory
+    // (e.g. `--memory file=<path>`). After a successful SaveSnapshot the
+    // VM remains paused; ResumeVm is refused until the next process
+    // launches with `--restore-snapshot <dir>` (because resuming in place
+    // would mutate the memory file backing the snapshot).
+    rpc SaveSnapshot(SaveSnapshotRequest) returns (google.protobuf.Empty);
+
     // Quit will shutdown the process hosting the ttrpc server.
     rpc Quit(google.protobuf.Empty) returns (google.protobuf.Empty);
 }
@@ -333,4 +342,12 @@ message ModifyResourceRequest {
         WindowsPCIDevice windows_device = 8;
         NvmeNamespaceConfig nvme_namespace = 9;
     }
+}
+
+// Save a full VM snapshot (memory + state) to the given directory.
+message SaveSnapshotRequest {
+    // Directory to write the snapshot to. Must not already exist; the
+    // server creates it. The directory will contain a `memory.bin` (the
+    // fsync'd guest RAM) and additional state files.
+    string dir = 1;
 }

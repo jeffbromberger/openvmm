@@ -133,6 +133,19 @@ enum Cmd {
         #[arg(long)]
         dir: PathBuf,
     },
+
+    /// Synthetic platform reset on the running VM. Re-initializes all
+    /// devices and re-runs UEFI / firmware boot. Equivalent to pressing
+    /// a hard reset button: guest disk state is preserved, in-memory state
+    /// is discarded. Use this to bring a halted or stuck VM back to life
+    /// without killing openvmm.
+    Reset,
+
+    /// Clear the halted flag on a guest that previously powered off but
+    /// whose openvmm process is still alive. Lighter than `reset` -- does
+    /// not reinitialize devices. After ClearHalt the BSP can run again; if
+    /// you want a clean boot, use `reset` instead.
+    ClearHalt,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -299,6 +312,22 @@ fn main() -> anyhow::Result<()> {
                     dir.display()
                 );
             }
+            Cmd::Reset => {
+                client
+                    .call()
+                    .start(vmservice::Vm::ResetVm, ())
+                    .await
+                    .map_err(|s| anyhow::anyhow!("ResetVm rpc failed: {s:?}"))?;
+                println!("reset issued; guest is rebooting");
+            }
+            Cmd::ClearHalt => {
+                client
+                    .call()
+                    .start(vmservice::Vm::ClearHaltVm, ())
+                    .await
+                    .map_err(|s| anyhow::anyhow!("ClearHaltVm rpc failed: {s:?}"))?;
+                println!("halt cleared");
+            }
         }
 
         anyhow::Ok(())
@@ -321,11 +350,19 @@ fn print_status(vm: &Node) {
         }
     };
 
-    // Try to surface the partition state up front, if present.
-    if let Some(state) = find_string(entries, &["partition", "state"]) {
-        println!("VM: state={state}");
+    // VM-wide power state up front. This is the authoritative answer to
+    // "is the guest doing anything right now?" -- it reflects what the
+    // virtual CPUs are doing. Per-controller `unit_state` only reflects
+    // whether the device's worker task is alive in openvmm, NOT whether
+    // it's actively handling IO; for that, look here first.
+    let power_state =
+        find_string(entries, &["partition", "power_state"]).unwrap_or_else(|| "(unknown)".into());
+    let halt_count = find_u64(entries, &["partition", "halt_count"]).unwrap_or(0);
+    let vm_halted = power_state == "halted";
+    if halt_count > 0 || vm_halted {
+        println!("VM: power_state={power_state}  halt_count={halt_count}");
     } else {
-        println!("VM:");
+        println!("VM: power_state={power_state}");
     }
 
     // Iterate top-level entries, looking for NVMe controllers. They appear
@@ -348,11 +385,11 @@ fn print_status(vm: &Node) {
         if i > 0 {
             println!();
         }
-        print_controller(name, node);
+        print_controller(name, node, vm_halted);
     }
 }
 
-fn print_controller(name: &str, node: &Node) {
+fn print_controller(name: &str, node: &Node, vm_halted: bool) {
     let dir = match node {
         Node::Dir(d) => d,
         _ => {
@@ -379,7 +416,16 @@ fn print_controller(name: &str, node: &Node) {
         _ => "VEN_?&DEV_?".to_string(),
     };
 
-    println!("Controller {name}  [{unit_state}]  {id_str}");
+    // Disambiguate "unit_state=running" (worker task alive) from "actually
+    // serving IO". When the partition itself is halted, no guest is issuing
+    // commands, so the controller is functionally idle.
+    let state_str = if vm_halted && unit_state == "running" {
+        "idle - VM halted".to_string()
+    } else {
+        unit_state
+    };
+
+    println!("Controller {name}  [{state_str}]  {id_str}");
     if !subsys.is_empty() {
         // Trim to first 8 hex chars for brevity.
         let s = subsys

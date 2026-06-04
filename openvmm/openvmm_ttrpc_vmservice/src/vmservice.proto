@@ -50,8 +50,22 @@ service VM {
     // (e.g. `--memory file=<path>`). After a successful SaveSnapshot the
     // VM remains paused; ResumeVm is refused until the next process
     // launches with `--restore-snapshot <dir>` (because resuming in place
-    // would mutate the memory file backing the snapshot).
+     // would mutate the memory file backing the snapshot).
     rpc SaveSnapshot(SaveSnapshotRequest) returns (google.protobuf.Empty);
+
+    // ResetVm performs a synthetic platform reset on the running VM:
+    // re-initializes all devices and re-runs UEFI / firmware boot. Equivalent
+    // to the openvmm REPL `reset` command. Functionally similar to pressing
+    // a hard "reset" button on physical hardware -- guest disk state is
+    // preserved, in-memory state is discarded.
+    rpc ResetVm(google.protobuf.Empty) returns (google.protobuf.Empty);
+
+    // ClearHaltVm clears the "halted" flag on a guest that previously reached
+    // a power-off / halt state but whose process is still alive. Lets the
+    // guest BSP run again without a full device reset. Equivalent to the
+    // openvmm REPL `clear-halt` (alias `ch`) command. Use ResetVm if you
+    // want a clean post-reset state instead.
+    rpc ClearHaltVm(google.protobuf.Empty) returns (google.protobuf.Empty);
 
     // Quit will shutdown the process hosting the ttrpc server.
     rpc Quit(google.protobuf.Empty) returns (google.protobuf.Empty);

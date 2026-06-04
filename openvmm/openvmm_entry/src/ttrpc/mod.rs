@@ -485,6 +485,14 @@ impl VmService {
                         let r = self.save_snapshot(request);
                         self.start_rpc(response, r);
                     }
+                    vmservice::Vm::ResetVm((), response) => {
+                        let r = Ok(self.reset_vm(&vm));
+                        self.start_rpc(response, r);
+                    }
+                    vmservice::Vm::ClearHaltVm((), response) => {
+                        let r = Ok(self.clear_halt_vm(&vm));
+                        self.start_rpc(response, r);
+                    }
 
                     r @ vmservice::Vm::CapabilitiesVm(_, _)
                     | r @ vmservice::Vm::PropertiesVm(_, _) => {
@@ -884,6 +892,27 @@ impl VmService {
     fn resume_vm(&mut self, vm: &Vm) -> impl Future<Output = anyhow::Result<()>> + use<> {
         let recv = vm.worker_rpc.call(VmRpc::Resume, ());
         async move { recv.await.map(drop).context("resume failed") }
+    }
+
+    fn reset_vm(&mut self, vm: &Vm) -> impl Future<Output = anyhow::Result<()>> + use<> {
+        // Reset re-initializes all devices and re-runs UEFI / firmware boot.
+        // Functionally equivalent to a physical platform reset: guest disk
+        // state is preserved, in-memory state is discarded. After Reset the
+        // VM is no longer halted, so clear the halt flag we may have set
+        // from an earlier GuestHalt event.
+        self.halted = false;
+        let recv = vm.worker_rpc.call_failable(VmRpc::Reset, ());
+        async move { recv.await.context("reset failed") }
+    }
+
+    fn clear_halt_vm(&mut self, vm: &Vm) -> impl Future<Output = anyhow::Result<()>> + use<> {
+        // ClearHalt is the lighter-weight counterpart to Reset: it just
+        // clears the BSP-halted flag without re-initializing devices. Useful
+        // after a guest BugCheck / triple-fault scenario where the operator
+        // wants to inspect state before deciding whether to reset.
+        self.halted = false;
+        let recv = vm.worker_rpc.call(VmRpc::ClearHalt, ());
+        async move { recv.await.map(drop).context("clear-halt failed") }
     }
 
     fn save_snapshot(

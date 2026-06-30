@@ -333,7 +333,8 @@ struct Vm {
     /// launched from CLI via the `--ttrpc-management` path; empty when the
     /// VM was built via the `CreateVm` RPC (which does not currently expose
     /// NVMe controllers).
-    nvme_rpcs: std::collections::HashMap<String, mesh::Sender<nvme_resources::NvmeControllerRequest>>,
+    nvme_rpcs:
+        std::collections::HashMap<String, mesh::Sender<nvme_resources::NvmeControllerRequest>>,
 }
 
 /// Mode in which a `VmService` was constructed. Controls which RPCs are
@@ -1121,7 +1122,10 @@ impl VmService {
                     }
                     .boxed())
                 } else {
-                    anyhow::bail!("unsupported request type {} for NvmeNamespace", request.r#type);
+                    anyhow::bail!(
+                        "unsupported request type {} for NvmeNamespace",
+                        request.r#type
+                    );
                 }
             }
             Resource::VpmemDisk(_) => anyhow::bail!("vpmem not supported"),
@@ -1254,7 +1258,6 @@ async fn make_disk_config(disk: vmservice::ScsiDisk) -> anyhow::Result<ScsiDevic
         .into_resource(),
     })
 }
-
 
 /// Run a supplemental ttrpc/grpc management server alongside a VM that was
 /// already launched by some other means (e.g. the openvmm CLI). The caller

@@ -183,16 +183,14 @@ fn main() -> anyhow::Result<()> {
             } => {
                 let req = vmservice::ModifyResourceRequest {
                     r#type: vmservice::ModifyType::Add.into(),
-                    resource: Some(
-                        vmservice::modify_resource_request::Resource::NvmeNamespace(
-                            vmservice::NvmeNamespaceConfig {
-                                controller_name: controller,
-                                nsid,
-                                host_path: file.to_string_lossy().into_owned(),
-                                read_only,
-                            },
-                        ),
-                    ),
+                    resource: Some(vmservice::modify_resource_request::Resource::NvmeNamespace(
+                        vmservice::NvmeNamespaceConfig {
+                            controller_name: controller,
+                            nsid,
+                            host_path: file.to_string_lossy().into_owned(),
+                            read_only,
+                        },
+                    )),
                 };
                 client
                     .call()
@@ -204,16 +202,14 @@ fn main() -> anyhow::Result<()> {
             Cmd::RemoveNs { controller, nsid } => {
                 let req = vmservice::ModifyResourceRequest {
                     r#type: vmservice::ModifyType::Remove.into(),
-                    resource: Some(
-                        vmservice::modify_resource_request::Resource::NvmeNamespace(
-                            vmservice::NvmeNamespaceConfig {
-                                controller_name: controller,
-                                nsid,
-                                host_path: String::new(),
-                                read_only: false,
-                            },
-                        ),
-                    ),
+                    resource: Some(vmservice::modify_resource_request::Resource::NvmeNamespace(
+                        vmservice::NvmeNamespaceConfig {
+                            controller_name: controller,
+                            nsid,
+                            host_path: String::new(),
+                            read_only: false,
+                        },
+                    )),
                 };
                 client
                     .call()
@@ -222,7 +218,11 @@ fn main() -> anyhow::Result<()> {
                     .map_err(|s| anyhow::anyhow!("ModifyResource(Remove) rpc failed: {s:?}"))?;
                 println!("namespace removed");
             }
-            Cmd::Inspect { path, depth, format } => {
+            Cmd::Inspect {
+                path,
+                depth,
+                format,
+            } => {
                 let resp = client
                     .call()
                     .start(
@@ -295,7 +295,9 @@ fn main() -> anyhow::Result<()> {
                     .call()
                     .start(vmservice::Vm::ModifyResource, req)
                     .await
-                    .map_err(|s| anyhow::anyhow!("ModifyResource(Remove SCSI) rpc failed: {s:?}"))?;
+                    .map_err(|s| {
+                        anyhow::anyhow!("ModifyResource(Remove SCSI) rpc failed: {s:?}")
+                    })?;
                 println!("scsi disk removed at lun {lun}");
             }
             Cmd::SaveSnapshot { dir } => {
@@ -401,8 +403,7 @@ fn print_controller(name: &str, node: &Node, vm_halted: bool) {
     let vid = find_u64(dir, &["cfg_space", "hardware_ids", "vendor_id"]);
     let did = find_u64(dir, &["cfg_space", "hardware_ids", "device_id"]);
     let subsys = find_string(dir, &["config", "subsystem_id"]).unwrap_or_default();
-    let unit_state =
-        find_string(dir, &["unit_state"]).unwrap_or_else(|| "(unknown)".to_string());
+    let unit_state = find_string(dir, &["unit_state"]).unwrap_or_else(|| "(unknown)".to_string());
     let bar0 = find_string(dir, &["cfg_space", "active_bars", "bar0"]).unwrap_or_default();
     let max_sqs = find_u64(dir, &["config", "max_sqs"]).unwrap_or(0);
     let max_cqs = find_u64(dir, &["config", "max_cqs"]).unwrap_or(0);
@@ -428,10 +429,7 @@ fn print_controller(name: &str, node: &Node, vm_halted: bool) {
     println!("Controller {name}  [{state_str}]  {id_str}");
     if !subsys.is_empty() {
         // Trim to first 8 hex chars for brevity.
-        let s = subsys
-            .chars()
-            .take(8)
-            .collect::<String>();
+        let s = subsys.chars().take(8).collect::<String>();
         println!("  Subsystem: {s}...  BAR0: {bar0}");
     } else {
         println!("  BAR0: {bar0}");

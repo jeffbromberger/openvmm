@@ -462,10 +462,8 @@ async fn vm_config_from_command_line(
     // (and the legacy --nvme path). Stashed into VmResources so the
     // --ttrpc-management server can route ModifyResource requests to the
     // right controller.
-    let mut nvme_pcie_rpcs: std::collections::HashMap<
-        String,
-        mesh::Sender<NvmeControllerRequest>,
-    > = std::collections::HashMap::new();
+    let mut nvme_pcie_rpcs: std::collections::HashMap<String, mesh::Sender<NvmeControllerRequest>> =
+        std::collections::HashMap::new();
 
     // Register named controllers first, so that --disk on=<name>
     // references can be resolved.
@@ -2770,45 +2768,44 @@ async fn run_control_inner(
     // over that socket. The VM lifecycle remains owned by this CLI process;
     // the management server only mutates already-live state.
     #[cfg(any(feature = "grpc", feature = "ttrpc"))]
-    let _mgmt_task: Option<Task<anyhow::Result<()>>> = if let Some(path) =
-        opt.ttrpc_management.as_ref()
-    {
-        let _ = std::fs::remove_file(path);
-        let listener = unix_socket::UnixListener::bind(path)
-            .with_context(|| format!("failed to bind management socket {}", path.display()))?;
-        let nvme_rpcs = std::mem::take(&mut resources.nvme_pcie_rpcs);
-        let scsi_for_mgmt = resources.scsi_rpc.clone();
-        let worker_for_mgmt = vm_rpc.clone();
-        let controller_for_mgmt = vm_controller_send.clone();
-        let driver_for_mgmt = driver.clone();
-        let path_display = path.display().to_string();
-        tracing::info!(socket = %path_display,
-            nvme_controllers = nvme_rpcs.len(),
-            has_scsi = scsi_for_mgmt.is_some(),
-            "starting --ttrpc-management server"
-        );
-        Some(driver.spawn("ttrpc-management", async move {
-            let r = ttrpc::run_management(
-                driver_for_mgmt,
-                listener,
-                ttrpc::RpcTransport::Ttrpc,
-                worker_for_mgmt,
-                controller_for_mgmt,
-                scsi_for_mgmt,
-                nvme_rpcs,
-            )
-            .await;
-            if let Err(err) = &r {
-                tracing::error!(
-                    error = err.as_ref() as &dyn std::error::Error,
-                    "ttrpc management server exited with error"
-                );
-            }
-            r
-        }))
-    } else {
-        None
-    };
+    let _mgmt_task: Option<Task<anyhow::Result<()>>> =
+        if let Some(path) = opt.ttrpc_management.as_ref() {
+            let _ = std::fs::remove_file(path);
+            let listener = unix_socket::UnixListener::bind(path)
+                .with_context(|| format!("failed to bind management socket {}", path.display()))?;
+            let nvme_rpcs = std::mem::take(&mut resources.nvme_pcie_rpcs);
+            let scsi_for_mgmt = resources.scsi_rpc.clone();
+            let worker_for_mgmt = vm_rpc.clone();
+            let controller_for_mgmt = vm_controller_send.clone();
+            let driver_for_mgmt = driver.clone();
+            let path_display = path.display().to_string();
+            tracing::info!(socket = %path_display,
+                nvme_controllers = nvme_rpcs.len(),
+                has_scsi = scsi_for_mgmt.is_some(),
+                "starting --ttrpc-management server"
+            );
+            Some(driver.spawn("ttrpc-management", async move {
+                let r = ttrpc::run_management(
+                    driver_for_mgmt,
+                    listener,
+                    ttrpc::RpcTransport::Ttrpc,
+                    worker_for_mgmt,
+                    controller_for_mgmt,
+                    scsi_for_mgmt,
+                    nvme_rpcs,
+                )
+                .await;
+                if let Err(err) = &r {
+                    tracing::error!(
+                        error = err.as_ref() as &dyn std::error::Error,
+                        "ttrpc management server exited with error"
+                    );
+                }
+                r
+            }))
+        } else {
+            None
+        };
 
     // Spawn the VmController as a task.
     let controller_task = driver.spawn(
